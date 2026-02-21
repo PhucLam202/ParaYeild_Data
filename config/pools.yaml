@@ -1,0 +1,55 @@
+# Pool Configuration
+# Add new tokens or pools here — no code changes needed.
+# Structure: {protocol} → {network} → {poolType} → {config}
+
+# ─── Bifrost ──────────────────────────────────────────────────────────────────
+bifrost:
+  polkadot:
+    vstaking:
+      url: "https://app.bifrost.io/vstaking?network=polkadot"
+      pageWaitMs: 3000
+      tokens:
+        - vDOT
+        - vETH
+        - vASTR
+        - vMANTA
+        - vBNC
+        - vGLMR
+        - vPHA
+        - vFIL
+
+    farming:
+      url: "https://app.bifrost.io/farming?network=polkadot"
+      pageWaitMs: 3000
+      tokens:
+        - vDOT
+        - vETH
+        - vASTR
+        - vMANTA
+        - vBNC
+        - vGLMR
+        - vPHA
+        - vFIL
+
+  kusama:
+    vstaking:
+      url: "https://app.bifrost.io/vstaking?network=kusama"
+      pageWaitMs: 3000
+      tokens:
+        - vKSM
+        - vBNC
+        - vMOVR
+
+# ─── Moonwell ─────────────────────────────────────────────────────────────────
+# Moonwell fetches ALL markets in a single Ponder API call (no per-token config needed).
+# Chains are auto-discovered from the API response by chainId.
+moonwell:
+  moonbeam:
+    markets:
+      chainId: 1284
+      apiBase: "https://ponder.moonwell.fi/v1"
+
+  base:
+    markets:
+      chainId: 8453
+      apiBase: "https://ponder.moonwell.fi/v1"
