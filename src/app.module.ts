@@ -5,6 +5,7 @@ import { SharedModule } from './shared/shared.module';
 import { BifrostModule } from './modules/bifrost/bifrost.module';
 import { MoonwellModule } from './modules/moonwell/moonwell.module';
 import { HydrationModule } from './modules/hydration/hydration.module';
+import { PoolsModule } from './modules/pools/pools.module';
 import { BifrostSnapshot, MoonwellSnapshot, HydrationSnapshot } from './shared/entities/protocol-snapshot.entity';
 import { CrawlLog } from './shared/entities/crawl-log.entity';
 
@@ -32,6 +33,9 @@ import { CrawlLog } from './shared/entities/crawl-log.entity';
         BifrostModule,
         MoonwellModule,
         HydrationModule,
+
+        // ── Data-Serving Modules ──────────────────────────────────────────────
+        PoolsModule,  // GET /pools* — aggregated pool data for Main BE
     ],
 })
 export class AppModule { }
