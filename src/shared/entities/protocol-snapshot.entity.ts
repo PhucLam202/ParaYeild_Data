@@ -11,7 +11,7 @@
  * Required packages: @nestjs/typeorm typeorm mongodb
  */
 
-import { Entity, ObjectIdColumn, Column, CreateDateColumn, Index } from 'typeorm';
+import { Entity, ObjectIdColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { ObjectId } from 'mongodb';
 
 // ─── Pool Type Registry ──────────────────────────────────────────────────────
@@ -42,12 +42,14 @@ export enum Network {
     ASTAR = 'astar',
 }
 
-// ─── Base Snapshot Definition (No @Entity here) ──────────────────────────────
+// ─── Base Snapshot Definition ─────────────────────────────────────────────────
 /**
- * For MongoDB, we define a compound index on all fields that define a "unique" 
- * historical data point to prevent duplicates during multiple crawls.
+ * Unique key per day: (network, poolType, assetSymbol, snapshotDate)
+ * One document per asset per UTC day. The cron job upserts ($set) into this
+ * document every 10 minutes, updating APY to the latest value within that day.
+ * After 00:00 UTC, snapshotDate increments → a fresh document is created.
  */
-@Index(['network', 'poolType', 'assetSymbol', 'dataTimestamp'], { unique: true })
+@Index(['network', 'poolType', 'assetSymbol', 'snapshotDate'], { unique: true })
 export abstract class BaseProtocolSnapshot {
     @ObjectIdColumn()
     _id?: ObjectId;
@@ -63,6 +65,13 @@ export abstract class BaseProtocolSnapshot {
 
     @Column()
     assetSymbol: string;
+
+    /**
+     * UTC date key "YYYY-MM-DD" — defines the daily upsert bucket.
+     * Set by the service layer before persisting; never comes from the crawler.
+     */
+    @Column({ nullable: true })
+    snapshotDate?: string;
 
     @Column({ nullable: true })
     supplyApy?: number;
@@ -85,12 +94,20 @@ export abstract class BaseProtocolSnapshot {
     @Column('simple-json')
     metadata: Record<string, unknown>;
 
+    /** Timestamp of the actual data point from the external API (may be hourly). */
     @Column()
     dataTimestamp: Date;
 
+    /** Timestamp when the document was first created (start of the UTC day). */
     @CreateDateColumn()
     crawledAt: Date;
+
+    /** Timestamp when the cron job last updated this document within the same UTC day. */
+    @UpdateDateColumn({ nullable: true })
+    updatedAt?: Date;
 }
+
+
 
 // ─── Protocol-Specific Collections ───────────────────────────────────────────
 

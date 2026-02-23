@@ -6,6 +6,7 @@ import { FarmingCrawler } from './crawlers/farming.crawler';
 import { CrawlResult } from '../../shared/crawlers/base-api.crawler';
 import { BifrostSnapshot, Protocol, PoolType, ProtocolSnapshot } from '../../shared/entities/protocol-snapshot.entity';
 import { ActivityLogService } from '../../shared/services/activity-log.service';
+import { getUtcDateKey } from '../../shared/utils/date.util';
 
 export interface CrawlAllResult {
     vstaking: CrawlResult<ProtocolSnapshot>;
@@ -65,13 +66,17 @@ export class BifrostService {
     }
 
     private async upsertSnapshots(snapshots: BifrostSnapshot[]): Promise<void> {
+        const dateKey = getUtcDateKey();
+        const now = new Date();
         for (const snapshot of snapshots) {
+            snapshot.snapshotDate = dateKey;
+            snapshot.updatedAt = now;
             await this.repository.findOneAndUpdate(
                 {
                     network: snapshot.network,
                     poolType: snapshot.poolType,
                     assetSymbol: snapshot.assetSymbol,
-                    dataTimestamp: snapshot.dataTimestamp,
+                    snapshotDate: dateKey,
                 },
                 { $set: snapshot },
                 { upsert: true }

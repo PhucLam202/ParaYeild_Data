@@ -6,6 +6,7 @@ import { BifrostModule } from './modules/bifrost/bifrost.module';
 import { MoonwellModule } from './modules/moonwell/moonwell.module';
 import { HydrationModule } from './modules/hydration/hydration.module';
 import { PoolsModule } from './modules/pools/pools.module';
+import { SchedulerModule } from './modules/scheduler/scheduler.module';
 import { BifrostSnapshot, MoonwellSnapshot, HydrationSnapshot } from './shared/entities/protocol-snapshot.entity';
 import { CrawlLog } from './shared/entities/crawl-log.entity';
 
@@ -36,6 +37,9 @@ import { CrawlLog } from './shared/entities/crawl-log.entity';
 
         // ── Data-Serving Modules ──────────────────────────────────────────────
         PoolsModule,  // GET /pools* — aggregated pool data for Main BE
+
+        // ── Scheduler ────────────────────────────────────────────────────────
+        SchedulerModule,  // Cron: crawl all protocols every 10 min, daily upsert
     ],
 })
 export class AppModule { }

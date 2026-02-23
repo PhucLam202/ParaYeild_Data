@@ -50,4 +50,22 @@ export class PoolsController {
             data,
         };
     }
+
+    /**
+     * GET /pools/history
+     * GET /pools/history?asset=DOT&from=2026-02-01&to=2026-02-22
+     *
+     * Returns all historical daily snapshots within the range, without deduplication.
+     */
+    @Get('history')
+    async getPoolsHistory(@Query() filter: PoolFilterDto) {
+        this.logger.log(`📊 GET /pools/history — filter: ${JSON.stringify(filter)}`);
+        const data = await this.poolsService.getPoolsHistory(filter);
+        return {
+            success: true,
+            count: data.length,
+            filter,
+            data,
+        };
+    }
 }
