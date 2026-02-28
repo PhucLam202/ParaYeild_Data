@@ -39,7 +39,7 @@ export interface FarmingItem {
 export class FarmingCrawler extends BaseApiCrawler<RawFarmingToken> {
     protected readonly logger = new Logger(FarmingCrawler.name);
     protected readonly protocol = Protocol.BIFROST;
-    protected readonly network = Network.POLKADOT;
+    protected readonly network = Network.BIFROST;
     protected readonly poolType = PoolType.FARMING;
 
     private readonly apiBase = 'https://dapi.bifrost.io/api/omni';

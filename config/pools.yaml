@@ -4,7 +4,7 @@
 
 # ─── Bifrost ──────────────────────────────────────────────────────────────────
 bifrost:
-  polkadot:
+  bifrost:
     vstaking:
       url: "https://app.bifrost.io/vstaking?network=polkadot"
       pageWaitMs: 3000

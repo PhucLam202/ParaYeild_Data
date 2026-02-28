@@ -40,6 +40,8 @@ export enum Network {
     BASE = 'base',
     ETHEREUM = 'ethereum',
     ASTAR = 'astar',
+    BIFROST = 'bifrost',
+    HYDRATION = 'hydration',
 }
 
 // ─── Base Snapshot Definition ─────────────────────────────────────────────────

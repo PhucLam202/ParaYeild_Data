@@ -59,22 +59,21 @@ export interface TokenMeta {
     poolTypes: string[];
 }
 
-// ─── Static Lookup Tables ─────────────────────────────────────────────────────
-const NETWORK_LABELS: Record<string, string> = {
-    polkadot: 'Polkadot',
-    kusama: 'Kusama',
-    moonbeam: 'Moonbeam',
-    base: 'Base',
-    ethereum: 'Ethereum',
-    astar: 'Astar',
-};
+// ─── Dynamic name formatter ────────────────────────────────────────────────────
+// "moonbeam" → "Moonbeam", "polkadot" → "Polkadot", "my-new-chain" → "My New Chain"
+// No hardcoded map — adding a new parachain to pools.yaml is enough.
+function toDisplayName(id: string): string {
+    return id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
 
+// Pool type labels: human-readable label + category for known types.
+// Unknown pool types auto-get a capitalized display name via toDisplayName().
 const POOL_TYPE_META: Record<string, { label: string; category: string }> = {
     vstaking: { label: 'Liquid Staking', category: 'staking' },
-    farming:  { label: 'Yield Farming',  category: 'defi' },
-    lending:  { label: 'Lending / Money Market', category: 'lending' },
-    dex:      { label: 'DEX / AMM',      category: 'defi' },
-    staking:  { label: 'Native Staking', category: 'staking' },
+    farming: { label: 'Yield Farming', category: 'defi' },
+    lending: { label: 'Lending / Money Market', category: 'lending' },
+    dex: { label: 'DEX / AMM', category: 'defi' },
+    staking: { label: 'Native Staking', category: 'staking' },
 };
 
 @Injectable()
@@ -145,7 +144,7 @@ export class PoolsService {
         const data: ParachainMeta[] = [...networkMap.entries()]
             .map(([id, protocols]) => ({
                 id,
-                name: NETWORK_LABELS[id] ?? id,
+                name: toDisplayName(id),
                 protocols: [...protocols].sort(),
             }))
             .sort((a, b) => a.name.localeCompare(b.name));
@@ -172,7 +171,7 @@ export class PoolsService {
 
         const data: ProtocolTypeMeta[] = [...typeMap.entries()]
             .map(([id, protocols]) => {
-                const meta = POOL_TYPE_META[id] ?? { label: id, category: 'other' };
+                const meta = POOL_TYPE_META[id] ?? { label: toDisplayName(id), category: 'other' };
                 return { id, label: meta.label, category: meta.category, protocols: [...protocols].sort() };
             })
             .sort((a, b) => a.label.localeCompare(b.label));

@@ -47,7 +47,7 @@ export interface VStakingItem {
 export class VStakingCrawler extends BaseApiCrawler<RawVStakingToken> {
     protected readonly logger = new Logger(VStakingCrawler.name);
     protected readonly protocol = Protocol.BIFROST;
-    protected readonly network = Network.POLKADOT;
+    protected readonly network = Network.BIFROST;
     protected readonly poolType = PoolType.VSTAKING;
 
     private readonly apiBase = 'https://dapi.bifrost.io/api/omni';

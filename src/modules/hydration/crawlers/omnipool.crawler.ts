@@ -87,7 +87,7 @@ export class HydrationOmnipoolCrawler {
 
         return {
             protocol: Protocol.HYDRATION,
-            network: Network.POLKADOT,
+            network: Network.HYDRATION,
             poolType: PoolType.DEX,
             timestamp: new Date().toISOString(),
             duration,
@@ -296,7 +296,7 @@ export class HydrationOmnipoolCrawler {
     private toSnapshot(raw: RawHydrationPool): ProtocolSnapshot {
         return {
             protocol: Protocol.HYDRATION,
-            network: Network.POLKADOT,
+            network: Network.HYDRATION,
             poolType: PoolType.DEX,
             assetSymbol: raw.assetSymbol,
             // For DEX/AMM pools, totalApy holds the combined Fee+Farm APR
