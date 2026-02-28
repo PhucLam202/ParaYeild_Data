@@ -44,7 +44,7 @@ interface RawMoonwellMarket {
 
 // ─── Target Chains ────────────────────────────────────────────────────────────
 
-const TARGET_CHAIN_IDS = [1284, 8453]; // Moonbeam, Base
+const TARGET_CHAIN_IDS = [1284]; // Moonbeam only
 
 // ─── Crawler ─────────────────────────────────────────────────────────────────
 

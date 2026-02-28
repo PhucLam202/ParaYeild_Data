@@ -76,5 +76,4 @@ export interface MoonwellMarket {
  */
 export const MOONWELL_CHAIN_NETWORK: Record<number, string> = {
     1284: 'moonbeam',
-    8453: 'base',
 };
