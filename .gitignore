@@ -40,4 +40,7 @@ pnpm-debug.log*
 .env.production
 
 # TypeScript
-/tsconfig.tsbuildinfo
+/tsconfig.
+
+.serena
+.claude

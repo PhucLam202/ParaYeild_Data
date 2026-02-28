@@ -10,54 +10,80 @@ import {
 import { PoolFilterDto, SortBy } from './dto/pool-filter.dto';
 
 // ─── Unified API Response Shape ───────────────────────────────────────────────
-/**
- * Normalized response schema for all protocols.
- * All protocols produce the same fields — missing values are undefined / null.
- */
 export interface PoolSummary {
-    // ── Identification ──────────────────────────────────────────────────────
-    protocol: string;            // "bifrost" | "moonwell" | "hydration"
-    network: string;             // "polkadot" | "moonbeam" | "base" | ...
-    poolType: string;            // "vstaking" | "farming" | "lending" | "dex"
-    assetSymbol: string;         // "vDOT", "USDC", "DOT" ...
-    snapshotDate?: string;       // "2026-02-23" (UTC day key)
-
-    // ── APY / APR ───────────────────────────────────────────────────────────
-    supplyApy?: number;          // Bifrost vStaking supplyApy / Moonwell supply APY (%)
-    borrowApy?: number;          // Moonwell borrow APY (%)
-    rewardApy?: number;          // Extra incentive APY (%)
-    totalApy?: number;           // Hydration fee+farm APR, or sum where applicable
-
-    // ── Market Size ─────────────────────────────────────────────────────────
-    tvlUsd?: number;             // Total Value Locked (USD)
-    utilizationRate?: number;    // Moonwell borrow utilization ratio (0-1)
-    volume24hUsd?: number;       // Hydration 24h trading volume (USD)
-    priceUsd?: number;           // Hydration asset price (USD)
-
-    // ── Bifrost-specific rolling windows ────────────────────────────────────
-    weekApy?: number;            // 7-day rolling APY (%)
-    monthApy?: number;           // 30-day rolling APY (%)
-    quarterApy?: number;         // 90-day rolling APY (%)
-
-    // ── Moonwell-specific market info ────────────────────────────────────────
-    marketAddress?: string;      // Moonwell market contract address
-    chainId?: number;            // EVM chain ID (1284 = Moonbeam, 8453 = Base)
-    collateralFactor?: number;   // Moonwell collateral factor
-    reserveFactor?: string | number; // Moonwell reserve factor
-
-    // ── Hydration-specific pool info ─────────────────────────────────────────
-    poolCategory?: string;       // "omnipool" | "stablepool"
-    assetName?: string;          // Hydration full asset name e.g. "GigaDOT"
-    feeAndFarmApr?: number;      // Hydration raw combined APR (%)
-
-    // ── Time tracking ────────────────────────────────────────────────────────
-    dataTimestamp: Date;         // Actual timestamp of the source data point
-    updatedAt?: Date;            // Last time the cron job wrote this record
+    protocol: string;
+    network: string;
+    poolType: string;
+    assetSymbol: string;
+    snapshotDate?: string;
+    supplyApy?: number;
+    borrowApy?: number;
+    rewardApy?: number;
+    totalApy?: number;
+    tvlUsd?: number;
+    utilizationRate?: number;
+    volume24hUsd?: number;
+    priceUsd?: number;
+    weekApy?: number;
+    monthApy?: number;
+    quarterApy?: number;
+    marketAddress?: string;
+    chainId?: number;
+    collateralFactor?: number;
+    reserveFactor?: string | number;
+    poolCategory?: string;
+    assetName?: string;
+    feeAndFarmApr?: number;
+    dataTimestamp: Date;
+    updatedAt?: Date;
 }
+
+// ─── Meta Response Shapes (for simulation/backtest engine) ────────────────────
+export interface ParachainMeta {
+    id: string;        // "polkadot"
+    name: string;      // "Polkadot"
+    protocols: string[];
+}
+
+export interface ProtocolTypeMeta {
+    id: string;        // "vstaking"
+    label: string;     // "Liquid Staking"
+    category: string;  // "staking" | "defi" | "lending"
+    protocols: string[];
+}
+
+export interface TokenMeta {
+    symbol: string;
+    protocols: string[];
+    networks: string[];
+    poolTypes: string[];
+}
+
+// ─── Static Lookup Tables ─────────────────────────────────────────────────────
+const NETWORK_LABELS: Record<string, string> = {
+    polkadot: 'Polkadot',
+    kusama: 'Kusama',
+    moonbeam: 'Moonbeam',
+    base: 'Base',
+    ethereum: 'Ethereum',
+    astar: 'Astar',
+};
+
+const POOL_TYPE_META: Record<string, { label: string; category: string }> = {
+    vstaking: { label: 'Liquid Staking', category: 'staking' },
+    farming:  { label: 'Yield Farming',  category: 'defi' },
+    lending:  { label: 'Lending / Money Market', category: 'lending' },
+    dex:      { label: 'DEX / AMM',      category: 'defi' },
+    staking:  { label: 'Native Staking', category: 'staking' },
+};
 
 @Injectable()
 export class PoolsService {
     private readonly logger = new Logger(PoolsService.name);
+
+    // ─── Simple in-memory TTL cache (avoids hitting DB on every meta request) ──
+    private readonly cache = new Map<string, { data: unknown; expiresAt: number }>();
+    private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
     constructor(
         @InjectRepository(BifrostSnapshot)
@@ -68,10 +94,8 @@ export class PoolsService {
         private readonly hydrationRepo: MongoRepository<HydrationSnapshot>,
     ) { }
 
-    /**
-     * Returns the latest snapshot per (assetSymbol, protocol, poolType) across all collections.
-     * Applies optional filters and sorts the final result.
-     */
+    // ─── Pool List Endpoints ──────────────────────────────────────────────────
+
     async getAllPools(filter: PoolFilterDto): Promise<PoolSummary[]> {
         const results: PoolSummary[] = [];
         const sources = this.selectSources(filter.protocol);
@@ -84,16 +108,10 @@ export class PoolsService {
         return this.applySortAndLimit(results, filter);
     }
 
-    /**
-     * Returns top-N pools sorted by the given field (default: totalApy desc).
-     */
     async getTopPools(limit: number, sortBy: SortBy): Promise<PoolSummary[]> {
         return this.getAllPools({ limit, sortBy });
     }
 
-    /**
-     * Returns all historical snapshots within the date range, without deduplication.
-     */
     async getPoolsHistory(filter: PoolFilterDto): Promise<PoolSummary[]> {
         const results: PoolSummary[] = [];
         const sources = this.selectSources(filter.protocol);
@@ -103,11 +121,100 @@ export class PoolsService {
             results.push(...docs.map(doc => this.toSummary(doc)));
         }
 
-        // Sort chronologically asc for history
         return results.sort((a, b) => a.dataTimestamp.getTime() - b.dataTimestamp.getTime());
     }
 
-    // ─── Private Helpers ───────────────────────────────────────────────────────
+    // ─── Meta / Simulation Endpoints ─────────────────────────────────────────
+
+    /**
+     * Returns all distinct networks (parachains) that have data,
+     * along with which protocols are available on each.
+     */
+    async getDistinctParachains(): Promise<ParachainMeta[]> {
+        const cached = this.getCached<ParachainMeta[]>('parachains');
+        if (cached) return cached;
+
+        const rows = await this.distinctGroupAcrossAll(['network', 'protocol']);
+
+        const networkMap = new Map<string, Set<string>>();
+        for (const row of rows) {
+            if (!networkMap.has(row.network)) networkMap.set(row.network, new Set());
+            networkMap.get(row.network)!.add(row.protocol);
+        }
+
+        const data: ParachainMeta[] = [...networkMap.entries()]
+            .map(([id, protocols]) => ({
+                id,
+                name: NETWORK_LABELS[id] ?? id,
+                protocols: [...protocols].sort(),
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        this.setCached('parachains', data);
+        return data;
+    }
+
+    /**
+     * Returns all distinct pool types with human-readable labels,
+     * along with which protocols support each type.
+     */
+    async getDistinctProtocolTypes(): Promise<ProtocolTypeMeta[]> {
+        const cached = this.getCached<ProtocolTypeMeta[]>('protocol-types');
+        if (cached) return cached;
+
+        const rows = await this.distinctGroupAcrossAll(['poolType', 'protocol']);
+
+        const typeMap = new Map<string, Set<string>>();
+        for (const row of rows) {
+            if (!typeMap.has(row.poolType)) typeMap.set(row.poolType, new Set());
+            typeMap.get(row.poolType)!.add(row.protocol);
+        }
+
+        const data: ProtocolTypeMeta[] = [...typeMap.entries()]
+            .map(([id, protocols]) => {
+                const meta = POOL_TYPE_META[id] ?? { label: id, category: 'other' };
+                return { id, label: meta.label, category: meta.category, protocols: [...protocols].sort() };
+            })
+            .sort((a, b) => a.label.localeCompare(b.label));
+
+        this.setCached('protocol-types', data);
+        return data;
+    }
+
+    /**
+     * Returns all distinct tokens/assets with which protocols, networks,
+     * and pool types they appear in. Used for token-pair selection in simulation.
+     */
+    async getDistinctTokens(): Promise<TokenMeta[]> {
+        const cached = this.getCached<TokenMeta[]>('tokens');
+        if (cached) return cached;
+
+        const rows = await this.distinctGroupAcrossAll(['assetSymbol', 'protocol', 'network', 'poolType']);
+
+        const tokenMap = new Map<string, { protocols: Set<string>; networks: Set<string>; poolTypes: Set<string> }>();
+        for (const row of rows) {
+            const sym = row.assetSymbol as string;
+            if (!tokenMap.has(sym)) tokenMap.set(sym, { protocols: new Set(), networks: new Set(), poolTypes: new Set() });
+            const entry = tokenMap.get(sym)!;
+            entry.protocols.add(row.protocol as string);
+            entry.networks.add(row.network as string);
+            entry.poolTypes.add(row.poolType as string);
+        }
+
+        const data: TokenMeta[] = [...tokenMap.entries()]
+            .map(([symbol, { protocols, networks, poolTypes }]) => ({
+                symbol,
+                protocols: [...protocols].sort(),
+                networks: [...networks].sort(),
+                poolTypes: [...poolTypes].sort(),
+            }))
+            .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+        this.setCached('tokens', data);
+        return data;
+    }
+
+    // ─── Private Helpers ──────────────────────────────────────────────────────
 
     private selectSources(protocol?: string): MongoRepository<any>[] {
         const all = [this.bifrostRepo, this.moonwellRepo, this.hydrationRepo];
@@ -121,45 +228,38 @@ export class PoolsService {
         return map[protocol] ? [map[protocol]] : all;
     }
 
+    /**
+     * Uses MongoDB aggregation pipeline to return the latest snapshot per
+     * (protocol, poolType, assetSymbol) key — much faster than JS dedup.
+     */
     private async fetchLatestSnapshots(
         repo: MongoRepository<BaseProtocolSnapshot>,
         filter: PoolFilterDto,
     ): Promise<BaseProtocolSnapshot[]> {
-        const where: Record<string, any> = {};
+        const matchStage = this.buildMatchStage(filter);
 
-        if (filter.asset) where['assetSymbol'] = filter.asset.toUpperCase();
-        if (filter.poolType) where['poolType'] = filter.poolType;
-        if (filter.network) where['network'] = filter.network;
-        if (filter.minApy != null) where['totalApy'] = { $gte: filter.minApy };
+        const pipeline: object[] = [
+            ...(Object.keys(matchStage).length ? [{ $match: matchStage }] : []),
+            { $sort: { dataTimestamp: -1 } },
+            {
+                $group: {
+                    _id: { protocol: '$protocol', poolType: '$poolType', assetSymbol: '$assetSymbol' },
+                    doc: { $first: '$$ROOT' },
+                },
+            },
+            { $replaceRoot: { newRoot: '$doc' } },
+        ];
 
-        const docs = await repo.find({
-            where,
-            order: { dataTimestamp: 'DESC' } as any,
-            take: 1500, // fetch enough to deduplicate latest-per-asset below
-        });
-
-        // Deduplicate: keep only the latest snapshot per (protocol, poolType, assetSymbol)
-        const seen = new Map<string, BaseProtocolSnapshot>();
-        for (const doc of docs) {
-            const key = `${doc.protocol}:${doc.poolType}:${doc.assetSymbol}`;
-            if (!seen.has(key)) seen.set(key, doc);
-        }
-
-        return [...seen.values()];
+        const cursor = repo.aggregate(pipeline);
+        return cursor.toArray() as Promise<BaseProtocolSnapshot[]>;
     }
 
     private async fetchHistorySnapshots(
         repo: MongoRepository<BaseProtocolSnapshot>,
         filter: PoolFilterDto,
     ): Promise<BaseProtocolSnapshot[]> {
-        const where: Record<string, any> = {};
+        const where = this.buildMatchStage(filter);
 
-        if (filter.asset) where['assetSymbol'] = filter.asset.toUpperCase();
-        if (filter.poolType) where['poolType'] = filter.poolType;
-        if (filter.network) where['network'] = filter.network;
-        if (filter.minApy != null) where['totalApy'] = { $gte: filter.minApy };
-
-        // Date range filter on dataTimestamp
         if (filter.from || filter.to) {
             const dateFilter: Record<string, any> = {};
             if (filter.from) dateFilter['$gte'] = filter.from;
@@ -173,50 +273,70 @@ export class PoolsService {
         });
     }
 
+    private buildMatchStage(filter: PoolFilterDto): Record<string, any> {
+        const match: Record<string, any> = {};
+        if (filter.asset) match['assetSymbol'] = filter.asset.toUpperCase();
+        if (filter.poolType) match['poolType'] = filter.poolType;
+        if (filter.network) match['network'] = filter.network;
+        if (filter.minApy != null) match['totalApy'] = { $gte: filter.minApy };
+        return match;
+    }
+
     /**
-     * Convert a raw DB document into the normalized PoolSummary schema.
-     * All protocol-specific metadata fields are surfaced at the top level.
+     * Aggregates distinct field combinations across all 3 protocol collections.
+     * E.g. fields = ['network', 'protocol'] → distinct (network, protocol) pairs.
      */
+    private async distinctGroupAcrossAll(fields: string[]): Promise<Record<string, string>[]> {
+        const groupId = fields.reduce<Record<string, string>>((acc, f) => {
+            acc[f] = `$${f}`;
+            return acc;
+        }, {});
+        const projectFields = fields.reduce<Record<string, string>>((acc, f) => {
+            acc[f] = `$_id.${f}`;
+            return acc;
+        }, { _id: '0' });
+
+        const pipeline = [
+            { $group: { _id: groupId } },
+            { $project: { _id: 0, ...projectFields } },
+        ];
+
+        const [bifrost, moonwell, hydration] = await Promise.all([
+            (this.bifrostRepo.aggregate(pipeline) as any).toArray(),
+            (this.moonwellRepo.aggregate(pipeline) as any).toArray(),
+            (this.hydrationRepo.aggregate(pipeline) as any).toArray(),
+        ]);
+
+        return [...bifrost, ...moonwell, ...hydration];
+    }
+
     private toSummary(doc: BaseProtocolSnapshot): PoolSummary {
         const m = (doc.metadata ?? {}) as Record<string, any>;
 
         return {
-            // ── Identification ───────────────────────────────────────────────
             protocol: doc.protocol,
             network: doc.network,
             poolType: doc.poolType,
             assetSymbol: doc.assetSymbol,
             snapshotDate: doc.snapshotDate,
-
-            // ── APY / APR ────────────────────────────────────────────────────
             supplyApy: doc.supplyApy,
             borrowApy: doc.borrowApy,
             rewardApy: doc.rewardApy,
             totalApy: doc.totalApy,
-
-            // ── Market Size ──────────────────────────────────────────────────
             tvlUsd: doc.tvlUsd,
             utilizationRate: doc.utilizationRate,
             volume24hUsd: m['volume24hUsd'] as number | undefined,
             priceUsd: m['priceUsd'] as number | undefined,
-
-            // ── Bifrost rolling windows (from metadata) ──────────────────────
             weekApy: m['weekApy'] as number | undefined,
             monthApy: m['monthApy'] as number | undefined,
             quarterApy: m['quarterApy'] as number | undefined,
-
-            // ── Moonwell market info (from metadata) ─────────────────────────
             marketAddress: m['marketAddress'] as string | undefined,
             chainId: m['chainId'] as number | undefined,
             collateralFactor: m['collateralFactor'] as number | undefined,
             reserveFactor: m['reserveFactor'] as string | number | undefined,
-
-            // ── Hydration pool info (from metadata) ──────────────────────────
             poolCategory: m['poolCategory'] as string | undefined,
             assetName: m['assetName'] as string | undefined,
             feeAndFarmApr: m['feeAndFarmApr'] as number | undefined,
-
-            // ── Time tracking ────────────────────────────────────────────────
             dataTimestamp: doc.dataTimestamp,
             updatedAt: doc.updatedAt,
         };
@@ -224,13 +344,23 @@ export class PoolsService {
 
     private applySortAndLimit(pools: PoolSummary[], filter: PoolFilterDto): PoolSummary[] {
         const sortField = filter.sortBy ?? SortBy.TOTAL_APY;
-
         const sorted = [...pools].sort((a, b) => {
             const aVal = (a as any)[sortField] ?? -Infinity;
             const bVal = (b as any)[sortField] ?? -Infinity;
-            return bVal - aVal; // always desc
+            return bVal - aVal;
         });
-
         return sorted.slice(0, filter.limit ?? 50);
+    }
+
+    // ─── Cache Helpers ────────────────────────────────────────────────────────
+
+    private getCached<T>(key: string): T | null {
+        const entry = this.cache.get(key);
+        if (entry && Date.now() < entry.expiresAt) return entry.data as T;
+        return null;
+    }
+
+    private setCached(key: string, data: unknown): void {
+        this.cache.set(key, { data, expiresAt: Date.now() + this.CACHE_TTL_MS });
     }
 }
