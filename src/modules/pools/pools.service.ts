@@ -262,7 +262,11 @@ export class PoolsService {
         if (filter.from || filter.to) {
             const dateFilter: Record<string, any> = {};
             if (filter.from) dateFilter['$gte'] = filter.from;
-            if (filter.to) dateFilter['$lte'] = filter.to;
+            if (filter.to) {
+                const toEndOfDay = new Date(filter.to);
+                toEndOfDay.setUTCHours(23, 59, 59, 999);
+                dateFilter['$lte'] = toEndOfDay;
+            }
             where['dataTimestamp'] = dateFilter;
         }
 
@@ -274,10 +278,18 @@ export class PoolsService {
 
     private buildMatchStage(filter: PoolFilterDto): Record<string, any> {
         const match: Record<string, any> = {};
-        if (filter.asset) match['assetSymbol'] = filter.asset.toUpperCase();
+        if (filter.asset) {
+            match['assetSymbol'] = { $regex: new RegExp('^' + filter.asset.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') };
+        }
         if (filter.poolType) match['poolType'] = filter.poolType;
         if (filter.network) match['network'] = filter.network;
-        if (filter.minApy != null) match['totalApy'] = { $gte: filter.minApy };
+        if (filter.minApy != null) {
+            match['$or'] = [
+                { totalApy: { $gte: filter.minApy } },
+                { supplyApy: { $gte: filter.minApy } },
+                { rewardApy: { $gte: filter.minApy } },
+            ];
+        }
         return match;
     }
 
@@ -343,9 +355,11 @@ export class PoolsService {
 
     private applySortAndLimit(pools: PoolSummary[], filter: PoolFilterDto): PoolSummary[] {
         const sortField = filter.sortBy ?? SortBy.TOTAL_APY;
+        const effectiveApy = (p: PoolSummary): number =>
+            p.totalApy ?? p.supplyApy ?? p.rewardApy ?? -Infinity;
         const sorted = [...pools].sort((a, b) => {
-            const aVal = (a as any)[sortField] ?? -Infinity;
-            const bVal = (b as any)[sortField] ?? -Infinity;
+            const aVal = sortField === SortBy.TOTAL_APY ? effectiveApy(a) : ((a as any)[sortField] ?? -Infinity);
+            const bVal = sortField === SortBy.TOTAL_APY ? effectiveApy(b) : ((b as any)[sortField] ?? -Infinity);
             return bVal - aVal;
         });
         return sorted.slice(0, filter.limit ?? 50);

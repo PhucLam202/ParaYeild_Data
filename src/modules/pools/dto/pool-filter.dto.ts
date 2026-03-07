@@ -1,6 +1,6 @@
 import { IsOptional, IsString, IsNumber, IsEnum, Min, Max, IsDate } from 'class-validator';
 import { Type } from 'class-transformer';
-import { Protocol, PoolType, Network } from '../../../shared/entities/protocol-snapshot.entity';
+import { Protocol } from '../../../shared/entities/protocol-snapshot.entity';
 
 export enum SortBy {
     TOTAL_APY = 'totalApy',
@@ -20,12 +20,12 @@ export class PoolFilterDto {
     asset?: string;
 
     @IsOptional()
-    @IsEnum(PoolType)
-    poolType?: PoolType;
+    @IsString()
+    poolType?: string;
 
     @IsOptional()
-    @IsEnum(Network)
-    network?: Network;
+    @IsString()
+    network?: string;
 
     @IsOptional()
     @Type(() => Number)
