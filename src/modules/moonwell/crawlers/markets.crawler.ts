@@ -163,10 +163,36 @@ export class MoonwellMarketsCrawler extends BaseApiCrawler<RawMoonwellMarket> {
         const network = MOONWELL_CHAIN_NETWORK[market.chainId] ?? `chain-${market.chainId}`;
         const assetSymbol = token?.symbol ?? `unknown-${market.underlyingTokenAddress.slice(0, 8)}`;
 
-        // APY from Ponder is raw decimal: 0.05 = 5%
-        // We store as percentage points: 5 (to match Bifrost format)
-        const supplyApy = latestSnapshot ? latestSnapshot.baseSupplyApy * 100 : undefined;
-        const borrowApy = latestSnapshot ? latestSnapshot.baseBorrowApy * 100 : undefined;
+        // APY from Ponder is inconsistent:
+        // Some assets (e.g. USDC) are raw decimals: 0.05 = 5%
+        // Some assets (e.g. GLMR) are already percentages: 118.34 = 118%
+        // We normalize to percentage points: 5.0 (for 5%)
+        const normalizeApy = (val: number | undefined, label: string) => {
+            if (val === undefined || val === null) return undefined;
+
+            if (val > 0) {
+                this.logger.debug(`📊 ${assetSymbol} raw ${label}: ${val}`);
+            }
+
+            // Ponder API convention:
+            // - Stablecoins return small decimals (e.g., 0.05 = 5%)
+            // - Volatile assets return percentages (e.g., 118.34 = 118.34%)
+            // Threshold: values < 1 are definitely decimals; >= 1 are percentages
+            if (val < 1) {
+                return val * 100;
+            }
+
+            // Warn on ambiguous range (1-5) where convention is uncertain
+            if (val >= 1 && val <= 5) {
+                this.logger.warn(
+                    `⚠️ ${assetSymbol} ${label}=${val} in ambiguous range [1-5] — treating as percentage`,
+                );
+            }
+
+            return val;
+        };
+        const supplyApy = normalizeApy(latestSnapshot?.baseSupplyApy, 'baseSupplyApy');
+        const borrowApy = normalizeApy(latestSnapshot?.baseBorrowApy, 'baseBorrowApy');
 
         const utilizationRate = latestSnapshot && latestSnapshot.totalSuppliesUSD > 0
             ? latestSnapshot.totalBorrowsUSD / latestSnapshot.totalSuppliesUSD
@@ -193,6 +219,8 @@ export class MoonwellMarketsCrawler extends BaseApiCrawler<RawMoonwellMarket> {
                 totalBorrowsUSD: latestSnapshot?.totalBorrowsUSD,
                 snapshotTimestamp: latestSnapshot?.timestamp,
                 tokenName: token?.name,
+                rawBaseSupplyApy: latestSnapshot?.baseSupplyApy,
+                rawBaseBorrowApy: latestSnapshot?.baseBorrowApy,
             },
         };
     }

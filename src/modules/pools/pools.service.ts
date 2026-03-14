@@ -8,6 +8,8 @@ import {
     BaseProtocolSnapshot,
 } from '../../shared/entities/protocol-snapshot.entity';
 import { PoolFilterDto, SortBy } from './dto/pool-filter.dto';
+import { calculateRiskScore } from '../../shared/utils/risk-score.util';
+import { getProtocolLogo, getTokenIcon } from '../../shared/constants/visual-assets';
 
 // ─── Unified API Response Shape ───────────────────────────────────────────────
 export interface PoolSummary {
@@ -36,6 +38,14 @@ export interface PoolSummary {
     feeAndFarmApr?: number;
     dataTimestamp: Date;
     updatedAt?: Date;
+    // Analytics (computed from historical data)
+    apy30dAvg?: number;
+    apyTrend?: 'up' | 'down' | 'stable';
+    riskScore?: number;
+    riskLabel?: 'Low' | 'Medium' | 'High';
+    // Visual assets
+    protocolLogo?: string;
+    tokenIcon?: string;
 }
 
 // ─── Meta Response Shapes (for simulation/backtest engine) ────────────────────
@@ -57,6 +67,12 @@ export interface TokenMeta {
     protocols: string[];
     networks: string[];
     poolTypes: string[];
+}
+
+interface ApyStats {
+    apy30dAvg: number;
+    apyStdDev: number;
+    apyTrend: 'up' | 'down' | 'stable';
 }
 
 // ─── Dynamic name formatter ────────────────────────────────────────────────────
@@ -83,6 +99,7 @@ export class PoolsService {
     // ─── Simple in-memory TTL cache (avoids hitting DB on every meta request) ──
     private readonly cache = new Map<string, { data: unknown; expiresAt: number }>();
     private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+    private readonly APY_STATS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
     constructor(
         @InjectRepository(BifrostSnapshot)
@@ -102,6 +119,29 @@ export class PoolsService {
         for (const repo of sources) {
             const docs = await this.fetchLatestSnapshots(repo as MongoRepository<BaseProtocolSnapshot>, filter);
             results.push(...docs.map(doc => this.toSummary(doc)));
+        }
+
+        // Enrich with analytics & visual assets
+        const apyStats = await this.getApyStatsMap();
+        for (const pool of results) {
+            const key = `${pool.protocol}|${pool.network}|${pool.poolType}|${pool.assetSymbol}`;
+            const stats = apyStats.get(key);
+
+            pool.apy30dAvg = stats?.apy30dAvg;
+            pool.apyTrend = stats?.apyTrend;
+
+            const effectiveApy = pool.totalApy ?? pool.supplyApy ?? pool.rewardApy;
+            const risk = calculateRiskScore({
+                tvlUsd: pool.tvlUsd,
+                apyVolatility: stats?.apyStdDev,
+                totalApy: effectiveApy,
+                poolType: pool.poolType,
+            });
+            pool.riskScore = risk.riskScore;
+            pool.riskLabel = risk.riskLabel;
+
+            pool.protocolLogo = getProtocolLogo(pool.protocol);
+            pool.tokenIcon = getTokenIcon(pool.assetSymbol);
         }
 
         return this.applySortAndLimit(results, filter);
@@ -215,6 +255,100 @@ export class PoolsService {
 
     // ─── Private Helpers ──────────────────────────────────────────────────────
 
+    private async getApyStatsMap(): Promise<Map<string, ApyStats>> {
+        const cached = this.getCached<Map<string, ApyStats>>('apy-stats');
+        if (cached) return cached;
+
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+        const cutoff = thirtyDaysAgo.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
+        const recentCutoff = sevenDaysAgo.toISOString().slice(0, 10);
+
+        const pipeline: object[] = [
+            { $match: { snapshotDate: { $gte: cutoff } } },
+            {
+                $addFields: {
+                    baseEffectiveApy: {
+                        $ifNull: ['$totalApy', { $ifNull: ['$supplyApy', 0] }],
+                    },
+                    isRecent: { $gte: ['$snapshotDate', recentCutoff] },
+                },
+            },
+            {
+                $addFields: {
+                    // Cap at 500% for sanity
+                    effectiveApy: { $min: ['$baseEffectiveApy', 500] },
+                    isCapped: { $gt: ['$baseEffectiveApy', 500] },
+                },
+            },
+            {
+                $group: {
+                    _id: {
+                        protocol: '$protocol',
+                        network: '$network',
+                        poolType: '$poolType',
+                        assetSymbol: '$assetSymbol',
+                    },
+                    apy30dAvg: { $avg: '$effectiveApy' },
+                    apyStdDev: { $stdDevPop: '$effectiveApy' },
+                    recentSum: {
+                        $sum: { $cond: ['$isRecent', '$effectiveApy', 0] },
+                    },
+                    recentCount: {
+                        $sum: { $cond: ['$isRecent', 1, 0] },
+                    },
+                    prevSum: {
+                        $sum: { $cond: ['$isRecent', 0, '$effectiveApy'] },
+                    },
+                    prevCount: {
+                        $sum: { $cond: ['$isRecent', 0, 1] },
+                    },
+                    anyCapped: { $max: '$isCapped' },
+                },
+            },
+        ];
+
+        const repos = [this.bifrostRepo, this.moonwellRepo, this.hydrationRepo];
+        const allRows = (
+            await Promise.all(
+                repos.map(repo => (repo.aggregate(pipeline) as any).toArray()),
+            )
+        ).flat();
+
+        const statsMap = new Map<string, ApyStats>();
+        for (const row of allRows) {
+            const id = row._id;
+            const key = `${id.protocol}|${id.network}|${id.poolType}|${id.assetSymbol}`;
+
+            let apyTrend: 'up' | 'down' | 'stable' = 'stable';
+            if (row.recentCount >= 2 && row.prevCount >= 2) {
+                const recentAvg = row.recentSum / row.recentCount;
+                const prevAvg = row.prevSum / row.prevCount;
+                if (recentAvg > prevAvg * 1.05) apyTrend = 'up';
+                else if (recentAvg < prevAvg * 0.95) apyTrend = 'down';
+            }
+
+            if (row.anyCapped) {
+                this.logger.warn(`⚠️ APY capped at 500% for ${key} during 30d stats calculation`);
+            }
+
+            statsMap.set(key, {
+                apy30dAvg: Math.round(row.apy30dAvg * 100) / 100,
+                apyStdDev: row.apyStdDev,
+                apyTrend,
+            });
+        }
+
+        this.cache.set('apy-stats', {
+            data: statsMap,
+            expiresAt: Date.now() + this.APY_STATS_CACHE_TTL_MS,
+        });
+        return statsMap;
+    }
+
     private selectSources(protocol?: string): MongoRepository<any>[] {
         const all = [this.bifrostRepo, this.moonwellRepo, this.hydrationRepo];
         if (!protocol) return all;
@@ -242,7 +376,7 @@ export class PoolsService {
             { $sort: { dataTimestamp: -1 } },
             {
                 $group: {
-                    _id: { protocol: '$protocol', poolType: '$poolType', assetSymbol: '$assetSymbol' },
+                    _id: { protocol: '$protocol', network: '$network', poolType: '$poolType', assetSymbol: '$assetSymbol' },
                     doc: { $first: '$$ROOT' },
                 },
             },
@@ -324,16 +458,19 @@ export class PoolsService {
     private toSummary(doc: BaseProtocolSnapshot): PoolSummary {
         const m = (doc.metadata ?? {}) as Record<string, any>;
 
+        // Apply sanity cap for UI (max 500% APY)
+        const cap = (v?: number) => (v != null ? Math.min(v, 500) : v);
+
         return {
             protocol: doc.protocol,
             network: doc.network,
             poolType: doc.poolType,
             assetSymbol: doc.assetSymbol,
             snapshotDate: doc.snapshotDate,
-            supplyApy: doc.supplyApy,
-            borrowApy: doc.borrowApy,
-            rewardApy: doc.rewardApy,
-            totalApy: doc.totalApy,
+            supplyApy: cap(doc.supplyApy),
+            borrowApy: cap(doc.borrowApy),
+            rewardApy: cap(doc.rewardApy),
+            totalApy: cap(doc.totalApy),
             tvlUsd: doc.tvlUsd,
             utilizationRate: doc.utilizationRate,
             volume24hUsd: m['volume24hUsd'] as number | undefined,

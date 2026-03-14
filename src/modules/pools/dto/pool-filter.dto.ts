@@ -8,6 +8,8 @@ export enum SortBy {
     REWARD_APY = 'rewardApy',
     TVL = 'tvlUsd',
     CRAWLED_AT = 'crawledAt',
+    APY_30D_AVG = 'apy30dAvg',
+    RISK_SCORE = 'riskScore',
 }
 
 export class PoolFilterDto {
