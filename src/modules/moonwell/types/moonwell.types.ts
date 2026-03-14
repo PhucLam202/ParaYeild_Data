@@ -1,79 +1,78 @@
 /**
- * Moonwell API response types.
+ * Moonwell SDK types and configuration.
  *
- * Sources:
- *   - Moonwell SDK: https://sdk.moonwell.fi/docs/glossary/types#market
- *   - REST API: https://ponder.moonwell.fi
- *
- * Note: The Ponder REST API returns snake_case fields; the SDK wraps
- * them into camelCase. These types model the SDK's Market shape to keep
- * things idiomatic in TypeScript.
+ * Source: @moonwell-fi/moonwell-sdk
+ * SDK always returns decimal values (e.g. 0.05 = 5%).
  */
 
-// ─── Token Info ───────────────────────────────────────────────────────────────
+// ─── Raw SDK Market (fields we use from the SDK's Market type) ──────────────
 
-export interface MoonwellToken {
-    address: string;
+export interface RawMoonwellSdkMarket {
+    marketKey: string;
     chainId: number;
-    decimals: number;
-    symbol: string;
-    name: string;
-    price: number; // USD price
-    priceUsd?: number;
-}
+    deprecated: boolean;
 
-// ─── Market Reward ────────────────────────────────────────────────────────────
+    underlyingToken: {
+        address: string;
+        symbol: string;
+        name: string;
+        decimals: number;
+    };
 
-export interface MoonwellReward {
-    token: MoonwellToken;
-    supplyApr: number; // % APR from rewards on supply side
-    borrowApr: number; // % APR from rewards on borrow side
-}
+    underlyingPrice: number;
 
-// ─── Raw Market (as returned by Moonwell SDK / Ponder API) ────────────────────
+    // Supply
+    totalSupply: number;
+    totalSupplyUsd: number;
+    baseSupplyApy: number;       // decimal (0.05 = 5%)
+    totalSupplyApr: number;      // decimal, includes base + all rewards
 
-/**
- * Raw market data from `getMarkets()` (Moonwell SDK) or
- * the Ponder REST API `GET /markets`.
- *
- * We intentionally keep only the fields we need for ProtocolSnapshot.
- * See: https://github.com/moonwell-fi/moonwell-sdk/blob/main/src/types/market.ts
- */
-export interface MoonwellMarket {
-    marketKey: string;          // unique key: e.g. 'USDC-moonbeam'
-    chainId: number;            // 1284 = Moonbeam, 8453 = Base
-    underlyingToken: MoonwellToken;
-    mToken: MoonwellToken;      // mToken (share token, e.g. mUSDC)
-
-    // ── Supply ────────────────────────────────────────────────────────────────
-    totalSupply: number;        // Total supply in underlying token units
-    totalSupplyUsd: number;     // Total supply in USD
-    baseSupplyApy: number;      // Base supply APY % (from interest rate model)
-
-    // ── Borrow ────────────────────────────────────────────────────────────────
+    // Borrow
     totalBorrows: number;
     totalBorrowsUsd: number;
-    baseBorrowApy: number;      // Base borrow APY %
-    utilizationRate: number;    // 0–1 (e.g. 0.63 = 63% utilization)
+    baseBorrowApy: number;       // decimal
+    totalBorrowApr: number;      // decimal
 
-    // ── Risk Parameters ────────────────────────────────────────────────────────
-    collateralFactor: number;   // 0–1, also called LTV in other protocols
-    reserveFactor: number;
+    // Risk
+    collateralFactor: number;    // decimal (0-1)
+    reserveFactor: number;       // decimal (0-1)
 
-    // ── Rewards ───────────────────────────────────────────────────────────────
-    rewards: MoonwellReward[];
+    // Rewards
+    rewards: Array<{
+        token: { symbol: string; address: string };
+        supplyApr: number;       // decimal
+        borrowApr: number;       // decimal
+        liquidStakingApr?: number;
+    }>;
 
-    // ── Status ────────────────────────────────────────────────────────────────
-    mintPaused: boolean;
-    borrowPaused: boolean;
-    seizePaused: boolean;
+    // Market token
+    marketToken: {
+        address: string;
+        symbol: string;
+    };
 }
 
-// ─── Chain / Network mapping ──────────────────────────────────────────────────
+// ─── Chain / Network mapping ────────────────────────────────────────────────
 
 /**
  * Maps Moonwell chainId → canonical network string used in ProtocolSnapshot.
  */
 export const MOONWELL_CHAIN_NETWORK: Record<number, string> = {
     1284: 'moonbeam',
+    8453: 'base',
+    10: 'optimism',
+};
+
+// ─── RPC Configuration ─────────────────────────────────────────────────────
+
+export const MOONWELL_RPC_CONFIG = {
+    moonbeam: {
+        rpcUrls: ['https://rpc.api.moonbeam.network'],
+    },
+    base: {
+        rpcUrls: ['https://mainnet.base.org'],
+    },
+    optimism: {
+        rpcUrls: ['https://mainnet.optimism.io'],
+    },
 };

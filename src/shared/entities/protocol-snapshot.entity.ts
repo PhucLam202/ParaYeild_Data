@@ -42,6 +42,7 @@ export enum Network {
     ASTAR = 'astar',
     BIFROST = 'bifrost',
     HYDRATION = 'hydration',
+    OPTIMISM = 'optimism',
 }
 
 // ─── Base Snapshot Definition ─────────────────────────────────────────────────

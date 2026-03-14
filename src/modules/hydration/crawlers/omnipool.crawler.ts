@@ -1,317 +1,314 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { chromium, Browser, Page } from 'playwright';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { ApiPromise, WsProvider } from '@polkadot/api';
 import { Protocol, Network, PoolType, ProtocolSnapshot } from '../../../shared/entities/protocol-snapshot.entity';
+import { CrawlResult } from '../../../shared/crawlers/base-api.crawler';
+import { scrapeHydrationVolumes } from '../helpers/volume-scraper';
 
-// ─── Raw Pool Shape (scraped from the UI table) ───────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────
 
-export interface RawHydrationPool {
-    /** Token symbol / pool asset label, e.g. "GDOT", "2-Pool" */
-    assetSymbol: string;
-    /** Full label beneath the symbol, e.g. "GigaDOT", "USDT, USDC" */
-    assetName?: string;
-    /** Price in USD, e.g. "$1.461" → 1.461 */
-    priceUsd?: number;
-    /** 24-hour trading volume in USD */
-    volume24hUsd?: number;
-    /** Total Value Locked in USD */
-    tvlUsd?: number;
-    /** Combined Fee + Farm APR percentage, e.g. "12.67%" → 12.67 */
-    feeAndFarmApr?: number;
-    /** Pool category derived from token names */
-    poolCategory: 'omnipool' | 'stablepool';
-}
+const RPC_ENDPOINTS = [
+    'wss://rpc.hydradx.cloud',
+    'wss://hydration-rpc.n.dwellir.com',
+    'wss://rpc.hydration.net',
+];
+
+/** USDT asset ID on Hydration — used as USD reference for spot prices */
+const USDT_ASSET_ID = '10';
+
+const WS_TIMEOUT_MS = 60_000;
 
 // ─── Crawler ─────────────────────────────────────────────────────────────────
 
 /**
  * HydrationOmnipoolCrawler
  *
- * Uses Playwright to scrape https://app.hydration.net/liquidity/omnipool-stablepools.
+ * Uses @galacticcouncil/sdk to fetch all Hydration pools (Omnipool, Stableswap,
+ * XYK, Aave, HSM) via WebSocket RPC. Calculates TVL from spot prices and
+ * fetches farm APRs via FarmClient.
  *
- * DOM structure (confirmed via live browser inspection):
- *   - Standard HTML <table> with <tbody> <tr> rows
- *   - Each <td> contains a <p> element with the value text
- *   - Columns: [0] Pool Asset, [1] Price, [2] 24H Volume, [3] TVL, [4] Fee+Farm APR
- *   - Symbol: td:first-child → first <p>
- *   - Name:   td:first-child → second <p> (optional sub-label)
- *   - Pagination: series of <button> elements; "Next" becomes plain text on last page
- *
- * Paginates through all pages automatically by clicking the "Next" button
- * until it is no longer rendered as a <button> element.
+ * Volume data is scraped from the Hydration UI as a best-effort supplement.
  */
 @Injectable()
-export class HydrationOmnipoolCrawler {
-    protected readonly logger = new Logger(HydrationOmnipoolCrawler.name);
+export class HydrationOmnipoolCrawler implements OnModuleDestroy {
+    private readonly logger = new Logger(HydrationOmnipoolCrawler.name);
+    private api: ApiPromise | null = null;
 
-    private readonly TARGET_URL = 'https://app.hydration.net/liquidity/omnipool-stablepools';
+    async onModuleDestroy(): Promise<void> {
+        if (this.api?.isConnected) {
+            await this.api.disconnect();
+            this.api = null;
+        }
+    }
 
     // ─── Main entry point ────────────────────────────────────────────────────
 
-    async crawl(): Promise<{
-        data: ProtocolSnapshot[];
-        duration: number;
-        itemsFound: number;
-        protocol: string;
-        network: string;
-        poolType: string;
-        timestamp: string;
-    }> {
+    async crawl(): Promise<CrawlResult<ProtocolSnapshot>> {
         const startTime = Date.now();
-        this.logger.log('🚀 [hydration/polkadot/dex] Starting Playwright crawl');
+        this.logger.log('🚀 [hydration/hydration/dex] Starting SDK-based crawl');
 
-        let browser: Browser | null = null;
-        let pools: RawHydrationPool[] = [];
+        let api: ApiPromise | null = null;
+        let sdk: any = null;
 
         try {
-            browser = await chromium.launch({
-                headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            });
+            // 1. Connect WebSocket
+            this.logger.log('🔗 Connecting to Hydration RPC...');
+            const wsProvider = new WsProvider(RPC_ENDPOINTS[0], 2_500, {}, WS_TIMEOUT_MS);
+            api = await ApiPromise.create({ provider: wsProvider });
+            this.api = api;
+            this.logger.log(`✅ Connected to: ${(await api.rpc.system.chain()).toString()}`);
 
-            const page = await browser.newPage();
-            page.setDefaultTimeout(60_000);
+            // 2. Create SDK context + FarmClient (ESM dynamic imports)
+            const { createSdkContext, FarmClient } = await import('@galacticcouncil/sdk');
+            sdk = createSdkContext(api);
+            const farmClient = new FarmClient(api);
 
-            pools = await this.scrapeAllPages(page);
-            this.logger.log(`✅ Crawl complete — ${pools.length} pools found`);
+            // 3. Get all pools
+            const pools: any[] = await sdk.ctx.pool.getPools();
+            this.logger.log(`🔍 Found ${pools.length} pools`);
+
+            // 4. Fetch spot prices (all unique tokens → USDT)
+            const spotPrices = await this.fetchSpotPrices(sdk, pools);
+
+            // 5. Fetch farm APRs
+            const farmAprs = await this.fetchFarmAprs(farmClient, pools);
+
+            // 6. Scrape volumes (graceful fallback)
+            const volumes = await this.fetchVolumes();
+
+            // 7. Build snapshots
+            const data = this.buildSnapshots(pools, spotPrices, farmAprs, volumes);
+            this.logger.log(`✅ Crawl complete — ${data.length} snapshots`);
+
+            const duration = Date.now() - startTime;
+            return {
+                protocol: Protocol.HYDRATION,
+                network: Network.HYDRATION,
+                poolType: PoolType.DEX,
+                timestamp: new Date().toISOString(),
+                duration,
+                itemsFound: data.length,
+                data,
+            };
         } catch (error) {
             this.logger.error(
                 `❌ Crawl failed: ${error instanceof Error ? error.message : String(error)}`,
             );
             throw error;
         } finally {
-            if (browser) await browser.close();
-        }
-
-        const data = pools.map((p) => this.toSnapshot(p));
-        const duration = Date.now() - startTime;
-
-        return {
-            protocol: Protocol.HYDRATION,
-            network: Network.HYDRATION,
-            poolType: PoolType.DEX,
-            timestamp: new Date().toISOString(),
-            duration,
-            itemsFound: data.length,
-            data,
-        };
-    }
-
-    // ─── Page orchestrator ───────────────────────────────────────────────────
-
-    private async scrapeAllPages(page: Page): Promise<RawHydrationPool[]> {
-        this.logger.log(`🌐 Navigating to ${this.TARGET_URL}`);
-
-        await page.goto(this.TARGET_URL, { waitUntil: 'networkidle', timeout: 60_000 });
-
-        // Dismiss the "New UI preview" modal/overlay if it appears
-        await this.dismissModal(page);
-
-        // Wait for the pool table to be rendered
-        await page.waitForSelector('table tbody tr', { timeout: 30_000 });
-
-        // Extra settle time for dynamic content
-        await page.waitForTimeout(2_000);
-
-        const allPools: RawHydrationPool[] = [];
-        let pageNum = 1;
-
-        while (true) {
-            this.logger.log(`📄 Scraping page ${pageNum}...`);
-
-            // Scroll to reveal any lazily-loaded rows
-            await this.scrollToBottom(page);
-            await page.waitForTimeout(1_000);
-
-            // Collect rows from the visible table
-            const pools = await this.scrapeCurrentPage(page);
-            this.logger.log(`   ↳ Found ${pools.length} pools on page ${pageNum}`);
-            allPools.push(...pools);
-
-            // Navigate to the next page if the button exists
-            const hasNext = await this.clickNextPage(page);
-            if (!hasNext) {
-                this.logger.log('🏁 No more pages — pagination complete');
-                break;
+            if (sdk) {
+                try { sdk.destroy(); } catch { /* ignore */ }
             }
-
-            pageNum++;
-            // Wait for the table to re-render after page change
-            await page.waitForTimeout(2_500);
-        }
-
-        return allPools;
-    }
-
-    // ─── Dismiss intro modal ─────────────────────────────────────────────────
-
-    private async dismissModal(page: Page): Promise<void> {
-        try {
-            const skipBtn = await page.$('button:has-text("Skip"), button:has-text("Dismiss"), button:has-text("Close")');
-            if (skipBtn) {
-                await skipBtn.click();
-                this.logger.log('ℹ️ Dismissed intro modal');
-                await page.waitForTimeout(1_000);
+            if (api?.isConnected) {
+                await api.disconnect();
             }
-        } catch {
-            // Modal not present — that's fine
+            this.api = null;
         }
     }
 
-    // ─── Smooth scroll to bottom ─────────────────────────────────────────────
+    // ─── Spot Prices ─────────────────────────────────────────────────────────
 
-    private async scrollToBottom(page: Page): Promise<void> {
-        await page.evaluate(async () => {
-            await new Promise<void>((resolve) => {
-                let totalHeight = 0;
-                const distance = 400;
-                const timer = setInterval(() => {
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    if (totalHeight >= document.body.scrollHeight) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 150);
+    private async fetchSpotPrices(
+        sdk: any,
+        pools: any[],
+    ): Promise<Map<string, number>> {
+        this.logger.log('💰 Fetching spot prices vs USDT...');
+        const spotPrices = new Map<string, number>();
+        spotPrices.set(USDT_ASSET_ID, 1.0);
+
+        // Collect unique token IDs
+        const tokenIds = new Set<string>();
+        for (const pool of pools) {
+            pool.tokens?.forEach((t: any) => {
+                if (t.id) tokenIds.add(t.id);
             });
-        });
+        }
+
+        let fetched = 0;
+        let failed = 0;
+        for (const tokenId of tokenIds) {
+            if (spotPrices.has(tokenId)) continue;
+            try {
+                const price = await sdk.api.router.getBestSpotPrice(
+                    tokenId,
+                    USDT_ASSET_ID,
+                );
+                if (price) {
+                    const priceNum = Number(price.amount) / 10 ** price.decimals;
+                    spotPrices.set(tokenId, priceNum);
+                    fetched++;
+                } else {
+                    failed++;
+                }
+            } catch {
+                failed++;
+            }
+        }
+
+        this.logger.log(`  Prices fetched: ${fetched}, unavailable: ${failed}`);
+        return spotPrices;
     }
 
-    // ─── Scrape rows from the current page ───────────────────────────────────
+    // ─── Farm APRs ───────────────────────────────────────────────────────────
 
-    private async scrapeCurrentPage(page: Page): Promise<RawHydrationPool[]> {
-        return page.evaluate((): RawHydrationPool[] => {
-            const results: RawHydrationPool[] = [];
+    private async fetchFarmAprs(
+        farmClient: any,
+        pools: any[],
+    ): Promise<Map<string, string>> {
+        this.logger.log('🌾 Fetching farm APRs...');
+        const farmAprs = new Map<string, string>();
 
-            // DOM structure (confirmed via live browser inspection):
-            //   <table> → <tbody> → <tr>  (one row per pool)
-            //   Each column value is wrapped in a <p> inside the <td>
-            const rows = Array.from(document.querySelectorAll('table tbody tr'));
+        // Omnipool tokens
+        const omnipools = pools.filter((p: any) => p.type === 'Omnipool');
+        const omnipoolTokenIds = new Set<string>();
+        for (const pool of omnipools) {
+            pool.tokens?.forEach((t: any) => {
+                if (t.id) omnipoolTokenIds.add(t.id);
+            });
+        }
 
-            for (const row of rows) {
-                const cells = Array.from(row.querySelectorAll('td'));
-                if (cells.length < 4) continue;
-
-                // ── Pool Asset (col 0) ─────────────────────────────────────────
-                // Symbol is in the first <p>, optional name label in the second <p>
-                const col0 = cells[0];
-                const pTags = Array.from(col0.querySelectorAll('p'));
-                const rawSymbol = pTags[0]?.textContent?.trim() ?? '';
-                if (!rawSymbol) continue;
-
-                const assetName = pTags[1]?.textContent?.trim();
-
-                // ── Pool category heuristic ────────────────────────────────────
-                const poolCategory: 'omnipool' | 'stablepool' =
-                    (assetName?.includes('USDT') ?? false) ||
-                        (assetName?.includes('USDC') ?? false) ||
-                        rawSymbol.includes('Pool') ||
-                        rawSymbol.includes('HUSDs') ||
-                        rawSymbol.includes('HUSDe')
-                        ? 'stablepool'
-                        : 'omnipool';
-
-                // ── Price (col 1) ──────────────────────────────────────────────
-                const rawPrice = cells[1]?.querySelector('p')?.textContent?.trim();
-
-                // ── 24H Volume (col 2) ─────────────────────────────────────────
-                const rawVolume = cells[2]?.querySelector('p')?.textContent?.trim();
-
-                // ── TVL (col 3) ────────────────────────────────────────────────
-                const rawTvl = cells[3]?.querySelector('p')?.textContent?.trim();
-
-                // ── Fee + Farm APR (col 4) ─────────────────────────────────────
-                // May be compound (fee% + farm%) — extract first numeric percentage
-                const rawApr = cells[4]?.textContent?.trim();
-
-                results.push({
-                    assetSymbol: rawSymbol,
-                    assetName,
-                    priceUsd: parseDollar(rawPrice),
-                    volume24hUsd: parseDollar(rawVolume),
-                    tvlUsd: parseDollar(rawTvl),
-                    feeAndFarmApr: parsePercent(rawApr),
-                    poolCategory,
-                });
+        let omniFarms = 0;
+        for (const assetId of omnipoolTokenIds) {
+            try {
+                const apr = await farmClient.getFarmApr(assetId, 'omnipool');
+                if (apr) {
+                    farmAprs.set(`omnipool:${assetId}`, apr);
+                    omniFarms++;
+                }
+            } catch {
+                // No farm for this asset
             }
+        }
+        this.logger.log(`  Omnipool farm APRs: ${omniFarms}/${omnipoolTokenIds.size}`);
 
-            return results;
-
-            // ── Inline helpers (browser context — no Node.js imports allowed) ──
-            function parseDollar(raw: string | undefined): number | undefined {
-                if (!raw) return undefined;
-                const cleaned = raw.replace(/[$,\s]/g, '');
-                const n = parseFloat(cleaned);
-                return isNaN(n) ? undefined : n;
+        // Isolated pools (Stableswap, XYK)
+        const isolatedPools = pools.filter(
+            (p: any) => p.type === 'Stableswap' || p.type === 'Xyk',
+        );
+        let isolatedFarms = 0;
+        for (const pool of isolatedPools) {
+            try {
+                const apr = await farmClient.getFarmApr(pool.address, 'isolatedpool');
+                if (apr) {
+                    farmAprs.set(`isolated:${pool.address}`, apr);
+                    isolatedFarms++;
+                }
+            } catch {
+                // No farm
             }
+        }
+        this.logger.log(`  Isolated pool farm APRs: ${isolatedFarms}/${isolatedPools.length}`);
 
-            function parsePercent(raw: string | undefined): number | undefined {
-                if (!raw) return undefined;
-                const match = raw.match(/([\d.]+)\s*%/);
-                if (!match) return undefined;
-                const n = parseFloat(match[1]);
-                return isNaN(n) ? undefined : n;
-            }
-        });
+        return farmAprs;
     }
 
-    // ─── Navigate to the next pagination page ────────────────────────────────
+    // ─── Volumes ─────────────────────────────────────────────────────────────
 
-    private async clickNextPage(page: Page): Promise<boolean> {
+    private async fetchVolumes(): Promise<Map<string, number>> {
+        this.logger.log('📊 Scraping 24H volumes from UI...');
         try {
-            // Scroll to where pagination controls are rendered
-            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-            await page.waitForTimeout(500);
-
-            // Key insight from browser inspection:
-            // On the LAST page, "Next" is rendered as PLAIN TEXT — not a <button>.
-            // So we only look for a <button> containing "Next".
-            const nextBtn = await page.$('button:has-text("Next")');
-
-            if (!nextBtn) {
-                this.logger.log('ℹ️ "Next" is not a button — last page reached');
-                return false;
-            }
-
-            // Verify not disabled
-            const ariaDisabled = await nextBtn.getAttribute('aria-disabled');
-            if (ariaDisabled === 'true') return false;
-
-            const isDisabled = await nextBtn.isDisabled();
-            if (isDisabled) return false;
-
-            const className = (await nextBtn.getAttribute('class')) ?? '';
-            if (/disabled/i.test(className)) return false;
-
-            this.logger.log('➡️  Clicking "Next" page...');
-            await nextBtn.click();
-            return true;
-        } catch (err) {
-            this.logger.warn(`⚠️ clickNextPage error: ${err}`);
-            return false;
+            return await scrapeHydrationVolumes();
+        } catch (error) {
+            this.logger.warn(
+                `⚠️ Volume scrape failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return new Map();
         }
     }
 
-    // ─── Map raw pool → ProtocolSnapshot ─────────────────────────────────────
+    // ─── Build Snapshots ─────────────────────────────────────────────────────
 
-    private toSnapshot(raw: RawHydrationPool): ProtocolSnapshot {
-        return {
-            protocol: Protocol.HYDRATION,
-            network: Network.HYDRATION,
-            poolType: PoolType.DEX,
-            assetSymbol: raw.assetSymbol,
-            // For DEX/AMM pools, totalApy holds the combined Fee+Farm APR
-            totalApy: raw.feeAndFarmApr,
-            tvlUsd: raw.tvlUsd,
-            dataTimestamp: new Date(),
-            crawledAt: new Date(),
-            metadata: {
-                assetName: raw.assetName,
-                priceUsd: raw.priceUsd,
-                volume24hUsd: raw.volume24hUsd,
-                feeAndFarmApr: raw.feeAndFarmApr,
-                poolCategory: raw.poolCategory,
-                sourceUrl: 'https://app.hydration.net/liquidity/omnipool-stablepools',
-            },
-        } as ProtocolSnapshot;
+    private buildSnapshots(
+        pools: any[],
+        spotPrices: Map<string, number>,
+        farmAprs: Map<string, string>,
+        volumes: Map<string, number>,
+    ): ProtocolSnapshot[] {
+        const snapshots: ProtocolSnapshot[] = [];
+        const now = new Date();
+
+        for (const pool of pools) {
+            if (pool.type === 'Omnipool') {
+                // 1 snapshot per token in the Omnipool
+                for (const token of pool.tokens || []) {
+                    const symbol = token.symbol || `asset-${token.id}`;
+                    const decimals = token.decimals || 12;
+                    const balance = Number(token.balance) / 10 ** decimals;
+                    const price = spotPrices.get(token.id) || 0;
+                    const tvlUsd = balance * price;
+
+                    const farmAprStr = farmAprs.get(`omnipool:${token.id}`);
+                    const totalApy = farmAprStr
+                        ? parseFloat(farmAprStr)
+                        : undefined;
+
+                    const volume24hUsd = volumes.get(symbol);
+
+                    snapshots.push({
+                        protocol: Protocol.HYDRATION,
+                        network: Network.HYDRATION,
+                        poolType: PoolType.DEX,
+                        assetSymbol: symbol,
+                        totalApy,
+                        tvlUsd: tvlUsd > 0 ? tvlUsd : undefined,
+                        dataTimestamp: now,
+                        crawledAt: now,
+                        metadata: {
+                            poolCategory: 'Omnipool',
+                            priceUsd: price > 0 ? price : undefined,
+                            poolAddress: pool.address,
+                            assetId: token.id,
+                            volume24hUsd,
+                            balance,
+                        },
+                    } as ProtocolSnapshot);
+                }
+            } else {
+                // Multi-token pools: Stableswap, Xyk, Aave, Hsm
+                const tokenSymbols = (pool.tokens || [])
+                    .map((t: any) => t.symbol || `asset-${t.id}`)
+                    .join('/');
+                const assetSymbol = tokenSymbols || `pool-${pool.address}`;
+
+                // Calculate TVL as sum of all token values
+                let tvlUsd = 0;
+                for (const token of pool.tokens || []) {
+                    const decimals = token.decimals || 12;
+                    const balance = Number(token.balance) / 10 ** decimals;
+                    const price = spotPrices.get(token.id) || 0;
+                    tvlUsd += balance * price;
+                }
+
+                const farmAprStr = farmAprs.get(`isolated:${pool.address}`);
+                const totalApy = farmAprStr
+                    ? parseFloat(farmAprStr)
+                    : undefined;
+
+                const volume24hUsd = volumes.get(assetSymbol);
+
+                snapshots.push({
+                    protocol: Protocol.HYDRATION,
+                    network: Network.HYDRATION,
+                    poolType: PoolType.DEX,
+                    assetSymbol,
+                    totalApy,
+                    tvlUsd: tvlUsd > 0 ? tvlUsd : undefined,
+                    dataTimestamp: now,
+                    crawledAt: now,
+                    metadata: {
+                        poolCategory: pool.type || 'Unknown',
+                        poolAddress: pool.address,
+                        volume24hUsd,
+                        tokens: (pool.tokens || []).map((t: any) => ({
+                            id: t.id,
+                            symbol: t.symbol,
+                            decimals: t.decimals,
+                            priceUsd: spotPrices.get(t.id),
+                        })),
+                    },
+                } as ProtocolSnapshot);
+            }
+        }
+
+        return snapshots;
     }
 }
