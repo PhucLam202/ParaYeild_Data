@@ -42,7 +42,7 @@ export class MoonwellMarketsCrawler extends BaseApiCrawler<RawMoonwellSdkMarket>
         });
 
         // Filter out deprecated markets
-        const active = (markets as RawMoonwellSdkMarket[]).filter(
+        const active = (markets as unknown as RawMoonwellSdkMarket[]).filter(
             (m) => !m.deprecated,
         );
 
